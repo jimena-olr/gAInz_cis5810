@@ -1,0 +1,19 @@
+﻿# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv*/
+venv/
+env/
+
+# VS Code / OS junk
+.vscode/
+.DS_Store
+Thumbs.db
+
+# (optional) big artifacts you don’t want in git
+models/
+*.tflite
+*.mp4
