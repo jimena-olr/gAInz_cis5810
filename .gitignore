@@ -17,3 +17,8 @@ Thumbs.db
 models/
 *.tflite
 *.mp4
+
+
+Videos/
+*.tflite
+*.mp4
