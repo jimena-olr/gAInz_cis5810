@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>gAInz Analyzer</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; padding: 20px; }
+    
+    /* Layout for all sections */
+    .view-section {
+      display: none; /* All sections hidden by default */
+      margin-bottom: 20px;
+    }
+    #recordingView {
+      display: block; /* Start by showing the recording view */
+    }
+    
+    /* Video container styles */
+    .video-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .video-container div {
+      flex: 1;
+      min-width: 400px;
+    }
+    
+    video {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      background-color: #f9f9f9;
+      width: 100%;
+      height: auto;
+    }
+
+    #controls { margin: 20px 0; }
+    button {
+      font-size: 16px;
+      padding: 10px 20px;
+      margin-right: 10px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+    }
+    #startButton { background-color: #28a745; color: white; }
+    #stopButton { background-color: #dc3545; color: white; }
+    button:disabled { background-color: #ccc; }
+    
+    #status { font-size: 1.1em; font-weight: bold; }
+    
+    #resultsView {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      background-color: #f4f4f4;
+    }
+    #resultsHeader {
+        padding: 15px;
+        border-bottom: 1px solid #ddd;
+    }
+    #resultsHeader h2 { margin: 0; }
+    #resultsBody {
+        padding: 15px;
+        display: flex;
+        gap: 20px;
+    }
+    #stats-list {
+      list-style-type: none;
+      padding-left: 0;
+      font-family: 'Courier New', Courier, monospace;
+    }
+    #stats-list li { padding: 4px 0; }
+
+  </style>
+</head>
+<body>
+  <h1>Shoulder Press Pose Analyzer</h1>
+
+  <div id="recordingView" class="view-section">
+    <h2>1. Record Exercise</h2>
+    <video id="liveVideo" width="320" height="240" autoplay muted></video>
+    <div id="controls">
+      <button id="startButton">Start Recording</button>
+      <button id="stopButton" disabled>Stop & Analyze</button>
+    </div>
+    <p id="status">Press "Start Recording" to begin.</p>
+  </div>
+
+  <div id="resultsView" class="view-section">
+    <div id="resultsHeader">
+        <h2>2. Analysis Results</h2>
+    </div>
+    
+    <div class="video-container">
+        <div>
+            <h3>Your Analyzed Performance</h3>
+            <video id="userAnalyzedVideo" controls autoplay muted loop></video>
+        </div>
+        <div>
+            <h3>Trainer Reference</h3>
+            <video id="trainerVideo" controls autoplay muted loop></video>
+        </div>
+    </div>
+    
+    <div id="resultsBody">
+        <div>
+            <p><strong>Score: <span id="score"></span> / 100</strong></p>
+            <p><strong>Feedback:</strong></p>
+            <ul id="feedback-list"></ul>
+        </div>
+        <div>
+            <p><strong>Detailed Stats:</strong></p>
+            <ul id="stats-list">
+                <li id="reps-stat"></li>
+                <li id="dtw-stat"></li>
+                <li id="norm-stat"></li>
+                <li id="frames-stat"></li>
+            </ul>
+        </div>
+    </div>
+    <button id="resetButton" style="margin: 20px;">Record Again</button>
+  </div>
+
+
+  <script>
+    // Get all the page elements
+    const liveVideo = document.getElementById('liveVideo');
+    const statusText = document.getElementById('status');
+    
+    const startButton = document.getElementById('startButton');
+    const stopButton = document.getElementById('stopButton');
+    const resetButton = document.getElementById('resetButton');
+
+    const recordingView = document.getElementById('recordingView');
+    const resultsView = document.getElementById('resultsView');
+    
+    const userAnalyzedVideo = document.getElementById('userAnalyzedVideo');
+    const trainerVideo = document.getElementById('trainerVideo');
+    
+    const scoreText = document.getElementById('score');
+    const feedbackList = document.getElementById('feedback-list');
+    const repsStat = document.getElementById('reps-stat');
+    const dtwStat = document.getElementById('dtw-stat');
+    const normStat = document.getElementById('norm-stat');
+    const framesStat = document.getElementById('frames-stat');
+
+    const API_URL = "http://localhost:8080";
+    
+    let mediaRecorder;
+    let recordedChunks = [];
+    let videoStream;
+
+    // 1. Setup Camera
+    async function setupCamera() {
+      try {
+        videoStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        liveVideo.srcObject = videoStream;
+      } catch (err) {
+        statusText.textContent = "Could not access camera. Please allow camera permissions.";
+        console.error("Camera error:", err);
+      }
+    }
+
+    // 2. Start Recording
+    function startRecording() {
+      if (!videoStream) {
+        statusText.textContent = "Camera not ready. Please wait.";
+        return;
+      }
+      recordedChunks = []; // Clear previous recording
+      
+      // Check for compatible MIME types
+      let options = { mimeType: 'video/webm;codecs=vp9' };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: 'video/webm;codecs=vp8' };
+          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+              options = { mimeType: 'video/webm' };
+              if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                  options = {}; // Let the browser decide
+              }
+          }
+      }
+
+      mediaRecorder = new MediaRecorder(videoStream, options);
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunks.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = uploadAndProcessVideo; // When stopped, call upload
+
+      mediaRecorder.start();
+      
+      statusText.textContent = "Recording...";
+      startButton.disabled = true;
+      stopButton.disabled = false;
+    }
+
+    // 3. Stop Recording
+    function stopRecording() {
+      if (mediaRecorder) {
+        mediaRecorder.stop(); // This will trigger the 'onstop' event
+      }
+      
+      statusText.textContent = "Analyzing...";
+      startButton.disabled = true;
+      stopButton.disabled = true;
+    }
+
+    // 4. Upload Video and Get Results
+    async function uploadAndProcessVideo() {
+      const videoBlob = new Blob(recordedChunks, {
+        type: mediaRecorder.mimeType
+      });
+
+      const formData = new FormData();
+      formData.append("video", videoBlob, "user_recording.webm");
+
+      try {
+        const response = await fetch(`${API_URL}/upload_and_analyze`, {
+          method: "POST",
+          body: formData
+          // No 'Content-Type' header, browser sets it with boundary
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || `Server error: ${response.status}`);
+        }
+
+        const results = await response.json();
+        
+        // --- Populate all fields ---
+        statusText.textContent = "Analysis complete!";
+        scoreText.textContent = results.similarity_score;
+        repsStat.textContent = `Reps Counted: ${results.reps_counted}`;
+        //dtwStat.textContent = `DTW Distance: ${results.dtw_distance}`;
+        //normStat.textContent = `Normalized Distance: ${results.normalized_distance}`;
+        //framesStat.textContent = `Frames: ${results.user_frames} (User) / ${results.trainer_frames} (Trainer)`;
+
+        feedbackList.innerHTML = ''; // Clear old feedback
+        results.feedback.forEach(fb => {
+          const li = document.createElement('li');
+          li.textContent = fb;
+          feedbackList.appendChild(li);
+        });
+        
+        // --- Set video sources ---
+        userAnalyzedVideo.src = API_URL + results.analyzed_video_url;
+        trainerVideo.src = API_URL + results.trainer_video_url;
+
+        // --- Switch views ---
+        recordingView.style.display = 'none';
+        resultsView.style.display = 'block';
+
+      } catch (err) {
+        console.error("Upload/Analysis error:", err);
+        statusText.textContent = `Analysis failed: ${err.message}. Please try again.`;
+        resetToRecord(); // Go back to recording state
+      }
+    }
+    
+    // 5. Reset to Recording View
+    function resetToRecord() {
+        resultsView.style.display = 'none';
+        recordingView.style.display = 'block';
+        
+        statusText.textContent = 'Press "Start Recording" to begin.';
+        startButton.disabled = false;
+        stopButton.disabled = true;
+
+        // Clear old video sources
+        userAnalyzedVideo.removeAttribute('src');
+        trainerVideo.removeAttribute('src');
+    }
+
+    // --- Event Listeners ---
+    startButton.addEventListener('click', startRecording);
+    stopButton.addEventListener('click', stopRecording);
+    resetButton.addEventListener('click', resetToRecord);
+
+    // --- Initialization ---
+    setupCamera();
+
+  </script>
+</body>
+</html>
