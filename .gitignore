@@ -22,3 +22,5 @@ models/
 Videos/
 *.tflite
 *.mp4
+
+.env
