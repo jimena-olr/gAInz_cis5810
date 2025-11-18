@@ -18,7 +18,10 @@ models/
 *.tflite
 *.mp4
 
-
 Videos/
 *.tflite
 *.mp4
+
+#User Videos
+static/output/
+uploads/
