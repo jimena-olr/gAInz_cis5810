@@ -69,6 +69,15 @@
       font-family: 'Courier New', Courier, monospace;
     }
     #stats-list li { padding: 4px 0; }
+    
+    /* New style for preformatted text feedback */
+    .feedback-text {
+        white-space: pre-wrap; /* Preserves newlines from AI */
+        background: #fff;
+        padding: 15px;
+        border-radius: 5px;
+        border: 1px solid #eee;
+    }
 
   </style>
 </head>
@@ -102,12 +111,13 @@
     </div>
     
     <div id="resultsBody">
-        <div>
+        <div style="flex: 2;">
             <p><strong>Score: <span id="score"></span> / 100</strong></p>
-            <p><strong>Feedback:</strong></p>
-            <ul id="feedback-list"></ul>
+            <p><strong>AI Feedback:</strong></p>
+            <!-- Changed ul to div to handle text blocks -->
+            <div id="feedback-container" class="feedback-text"></div>
         </div>
-        <div>
+        <div style="flex: 1;">
             <p><strong>Detailed Stats:</strong></p>
             <ul id="stats-list">
                 <li id="reps-stat"></li>
@@ -137,12 +147,13 @@
     const trainerVideo = document.getElementById('trainerVideo');
     
     const scoreText = document.getElementById('score');
-    const feedbackList = document.getElementById('feedback-list');
+    const feedbackContainer = document.getElementById('feedback-container');
     const repsStat = document.getElementById('reps-stat');
     const dtwStat = document.getElementById('dtw-stat');
     const normStat = document.getElementById('norm-stat');
     const framesStat = document.getElementById('frames-stat');
 
+    // Use relative path if serving from Flask, or absolute if opening file directly
     const API_URL = "http://localhost:8080";
     
     let mediaRecorder;
@@ -203,7 +214,7 @@
         mediaRecorder.stop(); // This will trigger the 'onstop' event
       }
       
-      statusText.textContent = "Analyzing...";
+      statusText.textContent = "Analyzing... (This may take 10-15 seconds)";
       startButton.disabled = true;
       stopButton.disabled = true;
     }
@@ -221,7 +232,6 @@
         const response = await fetch(`${API_URL}/upload_and_analyze`, {
           method: "POST",
           body: formData
-          // No 'Content-Type' header, browser sets it with boundary
         });
 
         if (!response.ok) {
@@ -230,23 +240,36 @@
         }
 
         const results = await response.json();
+        console.log("Results received:", results); // Debugging log
         
         // --- Populate all fields ---
         statusText.textContent = "Analysis complete!";
         scoreText.textContent = results.similarity_score;
         repsStat.textContent = `Reps Counted: ${results.reps_counted}`;
-        //dtwStat.textContent = `DTW Distance: ${results.dtw_distance}`;
-        //normStat.textContent = `Normalized Distance: ${results.normalized_distance}`;
-        //framesStat.textContent = `Frames: ${results.user_frames} (User) / ${results.trainer_frames} (Trainer)`;
+        dtwStat.textContent = `DTW Distance: ${results.dtw_distance}`;
+        normStat.textContent = `Norm. Distance: ${results.normalized_distance}`;
+        framesStat.textContent = `Frames: ${results.user_frames} (User) / ${results.trainer_frames} (Trainer)`;
 
-        feedbackList.innerHTML = ''; // Clear old feedback
-        results.feedback.forEach(fb => {
-          const li = document.createElement('li');
-          li.textContent = fb;
-          feedbackList.appendChild(li);
-        });
+        // --- FIX: Handle String vs Array Feedback ---
+        feedbackContainer.innerHTML = ''; 
+        
+        if (Array.isArray(results.feedback)) {
+            // Old style: List of strings
+            const ul = document.createElement('ul');
+            results.feedback.forEach(fb => {
+                const li = document.createElement('li');
+                li.textContent = fb;
+                ul.appendChild(li);
+            });
+            feedbackContainer.appendChild(ul);
+        } else {
+            // New style: Single AI String
+            // We replace newlines with <br> or just rely on white-space: pre-wrap css
+            feedbackContainer.textContent = results.feedback;
+        }
         
         // --- Set video sources ---
+        // Use a cache-busting query param to force reload if filename is same
         userAnalyzedVideo.src = API_URL + results.analyzed_video_url;
         trainerVideo.src = API_URL + results.trainer_video_url;
 
@@ -257,7 +280,12 @@
       } catch (err) {
         console.error("Upload/Analysis error:", err);
         statusText.textContent = `Analysis failed: ${err.message}. Please try again.`;
-        resetToRecord(); // Go back to recording state
+        
+        // Wait a moment so user can see error, then reset buttons
+        setTimeout(() => {
+             startButton.disabled = false;
+             stopButton.disabled = true;
+        }, 2000);
       }
     }
     
@@ -270,9 +298,9 @@
         startButton.disabled = false;
         stopButton.disabled = true;
 
-        // Clear old video sources
+        // Clear old video sources to save memory
         userAnalyzedVideo.removeAttribute('src');
-        trainerVideo.removeAttribute('src');
+        userAnalyzedVideo.load();
     }
 
     // --- Event Listeners ---

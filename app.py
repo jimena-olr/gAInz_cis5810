@@ -1,181 +1,6 @@
 '''
 **brew install ffmpeg**
-# app.py
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import cv2
-import numpy as np
-import base64
-from io import BytesIO
-from fastdtw import fastdtw
-from scipy.spatial.distance import euclidean
-import os
-
-# Import the classes, loader, AND angle_3pts function
-from dtw_analyzer import (
-    DTWMovementAnalyzer, PoseDetector, FeatureExtractor, 
-    load_trainer_data, angle_3pts 
-)
-
-app = Flask(__name__)
-CORS(app)
-
-# --- Global Variables ---
-try:
-    analyzer = DTWMovementAnalyzer(action="shoulder_press")
-    current_directory = os.getcwd()
-    file_name = "shoulder_press_trainer.pkl"
-    full_path = os.path.join(current_directory, file_name)
-    print(f"Loading data from full path: {full_path}")
-    load_trainer_data(analyzer, full_path) 
-    print("Trainer data loaded successfully.")
-except FileNotFoundError:
-    print(f"ERROR: Could not find '{file_name}'.")
-    print("Please run dtw_analyzer.py first to generate this file.")
-    exit()
-
-detector = PoseDetector("blazepose")
-extractor = FeatureExtractor("shoulder_press")
-
-user_sequence_features = []
-# --- NEW: Globals for rep counting ---
-rep_counter = 0
-rep_down_state = False
-# ------------------------------------
-
-
-@app.route("/start_session", methods=["POST"])
-def start_session():
-    """
-    Clears the previous session data to start a new recording.
-    """
-    global user_sequence_features, rep_counter, rep_down_state
-    user_sequence_features = []
-    # --- NEW: Reset rep counters ---
-    rep_counter = 0
-    rep_down_state = False
-    print("New session started. Feature list cleared.")
-    return jsonify({"status": "session_started"})
-
-
-@app.route("/process_frame", methods=["POST"])
-def process_frame():
-    """
-    Receives a single frame, processes it, draws the pose,
-    counts reps, and sends the drawn frame back.
-    """
-    global user_sequence_features, detector, extractor, rep_counter, rep_down_state
-    data = request.json
-    if "image" not in data:
-        return jsonify({"error": "No image data"}), 400
-
-    try:
-        img_data = base64.b64decode(data["image"].split(",")[1])
-        np_arr = np.frombuffer(img_data, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    except Exception as e:
-        print(f"Error decoding image: {e}")
-        return jsonify({"status": "image_error", "image": data["image"]})
-
-    if frame is None:
-        return jsonify({"status": "image_error", "image": data["image"]})
-
-    pts = detector.infer(frame)
-    image_to_send = data["image"] 
-    feedback_status = "no_pose"
-
-    if pts and len(pts) == 33:
-        features = extractor.extract_features(pts)
-        if features:
-            user_sequence_features.append(features)
-            feedback_status = "pose_detected"
-        
-        # --- NEW: Rep Counting Logic (from your dtw_analyzer)
-        try:
-            # Use the trainer's data to set rep thresholds
-            avg_min_elbow = analyzer.trainer_general_data.get('avg_min_elbow', 90) # Default 90
-            
-            angle_r_elbow = angle_3pts(pts[11], pts[13], pts[15])
-            
-            if angle_r_elbow < avg_min_elbow + 15:
-                rep_down_state = True
-            # Check for "up" state, add a buffer to prevent bouncing
-            if rep_down_state and angle_r_elbow > avg_min_elbow + 25: 
-                rep_counter += 1
-                rep_down_state = False
-        except Exception as e:
-            print(f"Error in rep counting: {e}")
-        # --- End Rep Counting ---
-
-        vis_frame = detector.draw(frame.copy(), pts, score_thresh=0.5)
-        
-        # Add rep count to the visual frame
-        cv2.putText(vis_frame, f"Reps: {rep_counter}", (12, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-        
-        _, buffer = cv2.imencode('.jpg', vis_frame)
-        vis_img_b64 = base64.b64encode(buffer).decode('utf-8')
-        image_to_send = f"data:image/jpeg;base64,{vis_img_b64}"
-        
-    return jsonify({"status": feedback_status, "image": image_to_send})
-
-
-@app.route("/analyze_session", methods=["POST"])
-def analyze_session():
-    """
-    Analyzes the complete recorded session against the trainer's data.
-    """
-    global user_sequence_features, analyzer, rep_counter
-    
-    if analyzer.trainer_sequence is None:
-        return jsonify({"error": "Trainer data not loaded"}), 500
-        
-    if len(user_sequence_features) < 20: 
-        return jsonify({
-            "error": "Not enough pose data collected. Please try recording for longer.",
-            "similarity_score": 0,
-            "feedback": ["Not enough data to analyze. Please record a full set of reps."]
-        })
-
-    user_sequence_np = np.array(user_sequence_features)
-    trainer_sequence_np = analyzer.trainer_sequence
-    
-    print(f"Analyzing... User frames: {len(user_sequence_np)}, Trainer frames: {len(trainer_sequence_np)}")
-
-    distance, path = fastdtw(trainer_sequence_np, user_sequence_np, dist=euclidean)
-    normalized_distance = distance / len(path)
-    
-    max_expected_distance = 5.0 
-    similarity_score = max(0, min(100, 100 * (1 - normalized_distance / max_expected_distance)))
-    
-    feedback = analyzer._generate_feedback(similarity_score, []) 
-    
-    # --- UPDATED: Send all data back ---
-    results = {
-        'similarity_score': round(similarity_score, 1),
-        'dtw_distance': round(distance, 2),
-        'normalized_distance': round(normalized_distance, 2),
-        'user_frames': len(user_sequence_np),
-        'trainer_frames': len(trainer_sequence_np),
-        'reps_counted': rep_counter, # Send the reps we counted
-        'feedback': feedback
-    }
-    # -----------------------------------
-    
-    print(f"Analysis complete. Score: {similarity_score}")
-    
-    # Clear the sequence for the next session
-    user_sequence_features = []
-
-    return jsonify(results)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
-
-    '''
-
-
+'''
 # app.py
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
@@ -189,36 +14,51 @@ import os
 import time
 from werkzeug.utils import secure_filename
 
-# Import components from dtw_analyzer
-from dtw_analyzer import (
-    DTWMovementAnalyzer, PoseDetector, FeatureExtractor, 
-    load_trainer_data, angle_3pts
-)
-
-app = Flask(__name__)
-CORS(app)
+from dotenv import load_dotenv
+load_dotenv() # Loads environment variables from .env file
 
 # --- Configuration ---
 UPLOAD_FOLDER = 'uploads'
 OUTPUT_FOLDER = os.path.join('static', 'output')
+
+# Import components from dtw_analyzer
+from dtw2 import (
+    DTWMovementAnalyzer, PoseDetector, FeatureExtractor, 
+    load_trainer_data, angle_3pts, align_skeleton
+)
+
+MODEL = "blazepose"         # The model name for PoseDetector
+ACTION = "shoulder_press"   # The action name for Analyzer/Extractor
+SCORE_THRESH = 0.5  
+
+
+app = Flask(__name__)
+CORS(app)
+
+# --- Flask Configuration ---
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['OUTPUT_FOLDER'] = OUTPUT_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 # 32 MB upload limit
 
 # --- Global Variables ---
 try:
-    analyzer = DTWMovementAnalyzer(action="shoulder_press")
-    full_path = os.path.join(os.getcwd(), "shoulder_press_trainer.pkl")
-    print(f"Loading data from full path: {full_path}")
-    load_trainer_data(analyzer, full_path) 
+    print("Initializing components...")
+    detector = PoseDetector(MODEL)
+    extractor = FeatureExtractor(ACTION)
+    analyzer = DTWMovementAnalyzer(ACTION)
+    
+    trainer_video_path = os.path.join("static", "shoulder_press_trainer.mp4")
+    print(f"Loading trainer data from: {trainer_video_path}")
+    if not os.path.exists(trainer_video_path):
+        raise FileNotFoundError(f"Trainer video not found at {trainer_video_path}")
+        
+    analyzer.record_trainer_sequence(trainer_video_path)
     print("Trainer data loaded successfully.")
-except FileNotFoundError:
-    print(f"ERROR: Could not find 'shoulder_press_trainer.pkl'.")
-    print("Please run dtw_analyzer.py first to generate this file.")
+    
+except Exception as e:
+    print(f"FATAL ERROR during initialization: {e}")
+    print("Please ensure 'static/shoulder_press_trainer.mp4' exists and 'mediapipe' is installed.")
     exit()
-
-detector = PoseDetector("blazepose")
-extractor = FeatureExtractor("shoulder_press")
 # ------------------------
 
 # Main endpoint to serve the index.html page
@@ -253,7 +93,9 @@ def upload_and_analyze():
 
     if file:
         # 1. Save the user's raw video
-        filename = f"user_video_{int(time.time())}.webm"
+        # Use secure_filename for safety
+        base_filename = secure_filename(file.filename or 'user_video')
+        filename = f"{os.path.splitext(base_filename)[0]}_{int(time.time())}.webm"
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(input_path)
         print(f"User video saved to: {input_path}")
@@ -273,12 +115,15 @@ def upload_and_analyze():
         
         except Exception as e:
             print(f"Error during video processing: {e}")
-            return jsonify({"error": f"Failed to process video: {e}"}), 500
+            # Import traceback to get more details
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": f"Failed to process video: {str(e)}"}), 500
 
 def process_video_file(input_path, output_path):
     """
     This function combines all the logic from dtw_analyzer's 
-    main() and analyze_user_video() functions.
+    main() and analyze_user_video() functions, using the new DTW2 classes.
     """
     global analyzer, detector, extractor
     
@@ -290,15 +135,21 @@ def process_video_file(input_path, output_path):
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps == 0: # Handle edge cases
+    if fps == 0 or fps > 60: # Handle edge cases
+        print(f"Warning: Invalid FPS ({fps}), defaulting to 20.0")
         fps = 20.0
         
     # --- Video Writer Setup ---
-    # Using 'mp4v' for MP4 format, which is web-friendly
+    # Using 'avc1' (H.264) for MP4 format, which is very web-friendly
     fourcc = cv2.VideoWriter_fourcc(*'avc1') 
     writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
     if not writer.isOpened():
-        raise IOError(f"Could not open video writer at {output_path}")
+        # Fallback to mp4v if avc1 fails
+        print("avc1 codec failed, falling back to mp4v...")
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+        if not writer.isOpened():
+            raise IOError(f"Could not open video writer at {output_path} with avc1 or mp4v")
     
     print(f"Writing analyzed video to {output_path} at {fps} FPS")
 
@@ -311,25 +162,34 @@ def process_video_file(input_path, output_path):
         if not ok:
             break
         
-        pts = detector.infer(frame)
+        pts_raw = detector.infer(frame)
         vis_frame = frame.copy() # Start with the original frame
 
-        if pts and len(pts) == 33:
-            features = extractor.extract_features(pts)
+        if pts_raw and len(pts_raw) == 33:
+            
+            # --- NEW: Align skeleton for feature extraction ---
+            if analyzer.trainer_ref_pts is not None:
+                pts_aligned = align_skeleton(pts_raw, analyzer.trainer_ref_pts)
+            else:
+                pts_aligned = pts_raw # Use raw points if no ref
+            
+            features = extractor.extract_features(pts_aligned)
             if features:
                 user_sequence.append(features)
             
-            # --- Rep Counting ---
+            # --- Rep Counting (using raw points) ---
             avg_min_elbow = analyzer.trainer_general_data.get('avg_min_elbow', 90)
-            angle_r_elbow = angle_3pts(pts[11], pts[13], pts[15])
+            angle_r_elbow = angle_3pts(pts_raw[11], pts_raw[13], pts_raw[15])
+            
+            # Using the logic from your original app.py for rep counting
             if angle_r_elbow < avg_min_elbow + 15:
                 down = True
             if down and angle_r_elbow > avg_min_elbow + 25:
                 reps += 1
                 down = False
             
-            # --- Draw on the frame ---
-            vis_frame = detector.draw(vis_frame, pts, score_thresh=0.5)
+            # --- Draw on the frame (using raw points) ---
+            vis_frame = detector.draw(vis_frame, pts_raw, score_thresh=SCORE_THRESH)
             cv2.putText(vis_frame, f"Reps: {reps}", (12, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
         
@@ -350,11 +210,32 @@ def process_video_file(input_path, output_path):
     print(f"Analyzing... User frames: {len(user_sequence_np)}, Trainer frames: {len(trainer_sequence_np)}")
 
     distance, path = fastdtw(trainer_sequence_np, user_sequence_np, dist=euclidean)
-    normalized_distance = distance / len(path)
+    normalized_distance = distance / len(path) if len(path) > 0 else 0
+    
+    # max_expected_distance is a tuning parameter. 
+    # 5.0 was from your new code, I'll keep it.
     max_expected_distance = 5.0 
     similarity_score = max(0, min(100, 100 * (1 - normalized_distance / max_expected_distance)))
     
-    feedback = analyzer._generate_feedback(similarity_score, []) 
+    # --- NEW: AI Feedback Generation ---
+    print("Generating detailed AI feedback...")
+    
+    # 1. Analyze feature differences
+    feature_analysis = analyzer._analyze_feature_differences(trainer_sequence_np, user_sequence_np, path)
+    
+    # 2. Analyze timing
+    timing_analysis = analyzer._analyze_timing_coordination(trainer_sequence_np, user_sequence_np, path)
+    
+    # 3. Identify patterns
+    patterns = analyzer._identify_movement_patterns(feature_analysis, timing_analysis)
+    
+    # 4. Generate prompt
+    prompt = analyzer._generate_chatgpt_prompt(patterns, similarity_score, reps)
+    
+    # 5. Get feedback from AI (or fallback)
+    feedback = analyzer.get_chatgpt_feedback(prompt)
+    
+    # --- ---
     
     results = {
         'similarity_score': round(similarity_score, 1),
@@ -363,7 +244,12 @@ def process_video_file(input_path, output_path):
         'user_frames': len(user_sequence_np),
         'trainer_frames': len(trainer_sequence_np),
         'reps_counted': reps,
-        'feedback': feedback
+        'feedback': feedback,
+        'analysis_details': { # Adding extra details for potential frontend use
+            'feature_stats': feature_analysis.get('feature_stats', {}),
+            'timing_stats': timing_analysis,
+            'identified_patterns': patterns
+        }
     }
     return results
 
@@ -371,4 +257,5 @@ if __name__ == "__main__":
     # Ensure all our directories exist
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+    print("Starting Flask server on http://0.0.0.0:8080")
     app.run(host="0.0.0.0", port=8080)

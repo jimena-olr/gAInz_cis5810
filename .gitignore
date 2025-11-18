@@ -18,9 +18,13 @@ models/
 *.tflite
 *.mp4
 
-
 Videos/
 *.tflite
 *.mp4
 
 .env
+
+#User Videos
+static/output/
+uploads/ 
+shoulder_press_trainer.pkl
