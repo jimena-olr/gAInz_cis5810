@@ -33,6 +33,23 @@
       height: auto;
     }
 
+    /* Camera preview: keep smaller than result videos */
+    #liveVideo {
+      width: 640px;
+      height: 480px;
+      max-width: 100%;
+      object-fit: contain; /* show entire frame without cropping */
+      background: #000;     /* letterbox color when aspect differs */
+      border-radius: 8px;
+    }
+
+    /* Analyzed/result videos should use available column width (remain larger) */
+    #userAnalyzedVideo, #trainerVideo {
+      width: 100%;
+      height: auto;
+      max-width: 720px; /* optional cap */
+    }
+
     #controls { margin: 20px 0; }
     button {
       font-size: 16px;
