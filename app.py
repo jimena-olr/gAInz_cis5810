@@ -65,7 +65,7 @@ except Exception as e:
 @app.route('/')
 def index():
     # Renders the index.html file
-    return render_template('index.html')
+    return send_from_directory('static', 'index.html')
 
 # Endpoint to serve static video files (like the analyzed output)
 @app.route('/static/output/<filename>')
