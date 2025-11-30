@@ -10,9 +10,6 @@
       display: none; /* All sections hidden by default */
       margin-bottom: 20px;
     }
-    #recordingView {
-      display: block; /* Start by showing the recording view */
-    }
     
     /* Video container styles */
     .video-container {
@@ -33,21 +30,21 @@
       height: auto;
     }
 
-    /* Camera preview: keep smaller than result videos */
+    /* Camera preview */
     #liveVideo {
       width: 640px;
       height: 480px;
       max-width: 100%;
-      object-fit: contain; /* show entire frame without cropping */
-      background: #000;     /* letterbox color when aspect differs */
+      object-fit: contain; 
+      background: #000;
       border-radius: 8px;
     }
 
-    /* Analyzed/result videos should use available column width (remain larger) */
+    /* Analyzed/result videos */
     #userAnalyzedVideo, #trainerVideo {
       width: 100%;
       height: auto;
-      max-width: 720px; /* optional cap */
+      max-width: 720px; 
     }
 
     #controls { margin: 20px 0; }
@@ -60,8 +57,8 @@
       cursor: pointer;
     }
     #startButton { background-color: #28a745; color: white; }
-    #stopButton { background-color: #dc3545; color: white; }
-    button:disabled { background-color: #ccc; }
+    #stopButton { background-color: #dc3545; color: white; display: none; /* Hidden by default */ }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
     
     #status { font-size: 1.1em; font-weight: bold; }
     
@@ -87,15 +84,6 @@
     }
     #stats-list li { padding: 4px 0; }
     
-    /* New style for preformatted text feedback */
-    .feedback-text {
-        white-space: pre-wrap; /* Preserves newlines from AI */
-        background: #fff;
-        padding: 15px;
-        border-radius: 5px;
-        border: 1px solid #eee;
-    }
-
     /* Chat / dialogue box styles */
     .chat-container {
       border: 1px solid #e6e6e6;
@@ -156,21 +144,73 @@
       color: white;
       border-top-right-radius: 4px;
     }
-    /* Input controls removed for read-only coach dialogue */
 
+    /* Exercise Card Styles */
+    .card-container {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      margin-top: 50px;
+    }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 20px;
+      width: 200px;
+      text-align: center;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      background: white;
+    }
+    .card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
+    .card h3 { margin-bottom: 10px; }
+    .card p { color: #666; font-size: 0.9em; }
+    
   </style>
 </head>
 <body>
-  <h1>Shoulder Press Pose Analyzer</h1>
+  <h1>AI Form Inspector</h1>
 
-  <div id="recordingView" class="view-section">
-    <h2>1. Record Exercise</h2>
-    <video id="liveVideo" width="320" height="240" autoplay muted></video>
-    <div id="controls">
-      <button id="startButton">Start Recording</button>
-      <button id="stopButton" disabled>Stop & Analyze</button>
+  <div id="selectionView" class="view-section" style="display: block;">
+    <h2 style="text-align:center;">Choose Your Exercise</h2>
+    <div class="card-container">
+      <div class="card" onclick="selectExercise('shoulder_press')">
+        <h3>Shoulder Press</h3>
+        <p>Barbell or Dumbbell overhead press.</p>
+      </div>
+      <div class="card" onclick="selectExercise('squat')">
+        <h3>Squat</h3>
+        <p>Standard bodyweight or weighted squat.</p>
+      </div>
+      <div class="card" onclick="selectExercise('jumping_jacks')">
+        <h3>Jumping Jacks</h3>
+        <p>Cardio coordination check.</p>
+      </div>
     </div>
-    <p id="status">Press "Start Recording" to begin.</p>
+  </div>
+  
+  <div id="recordingView" class="view-section">
+    <button onclick="goBack()" style="background:#666; font-size:14px; padding:5px 10px; margin-bottom:10px;">&larr; Back</button>
+    <h2 id="currentExerciseTitle">Recording: ...</h2>
+
+    <div class="video-container">
+      <div>
+        <h3>1. Record Exercise</h3>
+        <video id="liveVideo" width="320" height="240" autoplay muted></video>
+      </div>  
+    </div>
+
+    <div>  
+      <div id="controls">
+        <!-- Buttons toggle visibility now -->
+        <button id="startButton">Start Recording</button>
+        <button id="stopButton">Stop & Analyze</button>
+      </div>
+      <p id="status">Press "Start Recording" to begin.</p>
+    </div>
   </div>
 
   <div id="resultsView" class="view-section">
@@ -193,13 +233,9 @@
         <div style="flex: 2;">
             <p><strong>Score: <span id="score"></span> / 100</strong></p>
             <p><strong>AI Coach</strong></p>
-
-            <!-- Chat/dialogue box (Coach persona) -->
             <div id="chat-container" class="chat-container">
               <div id="chat-messages" class="chat-messages"></div>
             </div>
-
-            <!-- Read-only coach dialogue; input removed -->
         </div>
         <div style="flex: 1;">
             <p><strong>Detailed Stats:</strong></p>
@@ -214,16 +250,23 @@
     <button id="resetButton" style="margin: 20px;">Record Again</button>
   </div>
 
-
   <script>
-    // Get all the page elements
+    // --- Global State ---
+    let selectedAction = 'shoulder_press'; // Default
+    const API_URL = "http://localhost:8080"; // Matches your Flask backend
+    
+    let mediaRecorder;
+    let recordedChunks = [];
+    let videoStream;
+
+    // --- Elements ---
     const liveVideo = document.getElementById('liveVideo');
     const statusText = document.getElementById('status');
-    
     const startButton = document.getElementById('startButton');
     const stopButton = document.getElementById('stopButton');
     const resetButton = document.getElementById('resetButton');
-
+    
+    const selectionView = document.getElementById('selectionView');
     const recordingView = document.getElementById('recordingView');
     const resultsView = document.getElementById('resultsView');
     
@@ -235,13 +278,7 @@
     const dtwStat = document.getElementById('dtw-stat');
     const normStat = document.getElementById('norm-stat');
     const framesStat = document.getElementById('frames-stat');
-
-    // Use relative path if serving from Flask, or absolute if opening file directly
-    const API_URL = "http://localhost:8080";
-    
-    let mediaRecorder;
-    let recordedChunks = [];
-    let videoStream;
+    const chatMessagesEl = document.getElementById('chat-messages');
 
     // 1. Setup Camera
     async function setupCamera() {
@@ -260,56 +297,56 @@
         statusText.textContent = "Camera not ready. Please wait.";
         return;
       }
-      recordedChunks = []; // Clear previous recording
+      recordedChunks = [];
       
-      // Check for compatible MIME types
       let options = { mimeType: 'video/webm;codecs=vp9' };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
           options = { mimeType: 'video/webm;codecs=vp8' };
           if (!MediaRecorder.isTypeSupported(options.mimeType)) {
               options = { mimeType: 'video/webm' };
-              if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                  options = {}; // Let the browser decide
-              }
+              if (!MediaRecorder.isTypeSupported(options.mimeType)) options = {};
           }
       }
 
       mediaRecorder = new MediaRecorder(videoStream, options);
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          recordedChunks.push(event.data);
-        }
+        if (event.data.size > 0) recordedChunks.push(event.data);
       };
 
-      mediaRecorder.onstop = uploadAndProcessVideo; // When stopped, call upload
-
+      mediaRecorder.onstop = uploadAndProcessVideo;
       mediaRecorder.start();
       
       statusText.textContent = "Recording...";
-      startButton.disabled = true;
+      
+      // UI TOGGLE: Hide Start, Show Stop
+      startButton.style.display = "none";
+      stopButton.style.display = "inline-block";
       stopButton.disabled = false;
+      stopButton.textContent = "Stop & Analyze"; // Reset text
     }
 
     // 3. Stop Recording
     function stopRecording() {
       if (mediaRecorder) {
-        mediaRecorder.stop(); // This will trigger the 'onstop' event
+        mediaRecorder.stop();
       }
       
       statusText.textContent = "Analyzing... (This may take 10-15 seconds)";
-      startButton.disabled = true;
+      
+      // Disable stop button to prevent double clicks
       stopButton.disabled = true;
+      stopButton.textContent = "Processing...";
     }
 
     // 4. Upload Video and Get Results
     async function uploadAndProcessVideo() {
-      const videoBlob = new Blob(recordedChunks, {
-        type: mediaRecorder.mimeType
-      });
-
+      const videoBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
       const formData = new FormData();
       formData.append("video", videoBlob, "user_recording.webm");
+      
+      // Send the actual selected action
+      formData.append('action', selectedAction); 
 
       try {
         const response = await fetch(`${API_URL}/upload_and_analyze`, {
@@ -323,9 +360,9 @@
         }
 
         const results = await response.json();
-        console.log("Results received:", results); // Debugging log
+        console.log("Results received:", results);
         
-        // --- Populate all fields ---
+        // Populate fields
         statusText.textContent = "Analysis complete!";
         scoreText.textContent = results.similarity_score;
         repsStat.textContent = `Reps Counted: ${results.reps_counted}`;
@@ -333,27 +370,21 @@
         normStat.textContent = `Norm. Distance: ${results.normalized_distance}`;
         framesStat.textContent = `Frames: ${results.user_frames} (User) / ${results.trainer_frames} (Trainer)`;
 
-        // --- Chat integration: populate chat box with AI feedback ---
-        const chatMessagesEl = document.getElementById('chat-messages');
-
+        // Chat Feedback
         if (chatMessagesEl) {
-          // clear previous chat
           chatMessagesEl.innerHTML = '';
-          // opening coach line
-          addOpeningCoachLine();
-
+          addOpeningCoachLine(); 
           const aiText = Array.isArray(results.feedback)
             ? results.feedback.join('\n\n')
             : (results.feedback || 'No feedback.');
           addChatMessage(aiText, 'ai');
         }
         
-        // --- Set video sources ---
-        // Use a cache-busting query param to force reload if filename is same
+        // Set Videos
         userAnalyzedVideo.src = API_URL + results.analyzed_video_url;
         trainerVideo.src = API_URL + results.trainer_video_url;
 
-        // --- Switch views ---
+        // Switch Views
         recordingView.style.display = 'none';
         resultsView.style.display = 'block';
 
@@ -361,31 +392,55 @@
         console.error("Upload/Analysis error:", err);
         statusText.textContent = `Analysis failed: ${err.message}. Please try again.`;
         
-        // Wait a moment so user can see error, then reset buttons
-        setTimeout(() => {
-             startButton.disabled = false;
-             stopButton.disabled = true;
-        }, 2000);
+        // Error handling: Show Start button again so they can retry
+        startButton.style.display = "inline-block";
+        stopButton.style.display = "none";
       }
     }
     
-    // 5. Reset to Recording View
+    // 5. Reset / Back Functions
     function resetToRecord() {
         resultsView.style.display = 'none';
         recordingView.style.display = 'block';
         
         statusText.textContent = 'Press "Start Recording" to begin.';
+        
+        // UI RESET: Show Start, Hide Stop
+        startButton.style.display = "inline-block";
+        stopButton.style.display = "none";
         startButton.disabled = false;
-        stopButton.disabled = true;
 
-        // Clear old video sources to save memory
         userAnalyzedVideo.removeAttribute('src');
         userAnalyzedVideo.load();
     }
 
-    // --- Chat helper functions ---
-    const chatMessagesEl = document.getElementById('chat-messages');
+    function goBack() {
+        recordingView.style.display = 'none';
+        selectionView.style.display = 'block';
+        
+        // Reset UI just in case
+        startButton.style.display = "inline-block";
+        stopButton.style.display = "none";
+    }
 
+    function selectExercise(action) {
+        selectedAction = action;
+        
+        selectionView.style.display = 'none';
+        recordingView.style.display = 'block';
+        
+        // Friendly title mapping
+        const titles = {
+            'shoulder_press': 'Shoulder Press',
+            'squat': 'Squat',
+            'jumping_jacks': 'Jumping Jacks'
+        };
+        document.getElementById('currentExerciseTitle').textContent = 'Recording: ' + (titles[action] || action);
+        
+        setupCamera(); 
+    }
+
+    // --- Chat Logic ---
     function addChatMessage(text, sender = 'ai') {
       if (!chatMessagesEl) return;
       const wrapper = document.createElement('div');
@@ -394,14 +449,10 @@
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
       if (sender === 'ai') {
-        // Use the trainer avatar image from static/; fallback to initial 'G'
         const img = document.createElement('img');
         img.src = '/static/trainer_avatar.png';
-        img.alt = 'Gainz Inspector';
-        img.onerror = () => {
-          img.remove();
-          avatar.textContent = 'G';
-        };
+        img.alt = 'G';
+        img.onerror = () => { img.remove(); avatar.textContent = 'G'; };
         avatar.appendChild(img);
       } else {
         avatar.textContent = 'You';
@@ -412,11 +463,9 @@
       bubble.textContent = text || '';
 
       if (sender === 'ai') {
-        wrapper.appendChild(avatar);
-        wrapper.appendChild(bubble);
+        wrapper.appendChild(avatar); wrapper.appendChild(bubble);
       } else {
-        wrapper.appendChild(bubble);
-        wrapper.appendChild(avatar);
+        wrapper.appendChild(bubble); wrapper.appendChild(avatar);
       }
 
       chatMessagesEl.appendChild(wrapper);
@@ -424,15 +473,15 @@
     }
 
     function addOpeningCoachLine() {
-      addChatMessage("Hey! I'm the Gainz Inspector. I've analyzed your shoulder press and left a few suggestions.", 'ai');
+      // Dynamic opening line
+      const cleanName = selectedAction.replace('_', ' ');
+      addChatMessage(`Hey! I'm the Gainz Inspector. I've analyzed your ${cleanName} and left a few suggestions.`, 'ai');
     } 
-    // --- Event Listeners ---
+
+    // --- Listeners ---
     startButton.addEventListener('click', startRecording);
     stopButton.addEventListener('click', stopRecording);
     resetButton.addEventListener('click', resetToRecord);
-
-    // --- Initialization ---
-    setupCamera();
 
   </script>
 </body>

@@ -1,6 +1,6 @@
 class FeatureExtractor:
     # Extract features from pose keypoints for DTW comparison
-    def __init__(self):
+    def __init__(self, ACTION):
         self.action = ACTION
         self.prev_features = None
         

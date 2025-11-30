@@ -1,26 +1,27 @@
 import cv2
 import numpy as np
-from collections import deque
-from fastdtw import fastdtw
-from scipy.spatial.distance import euclidean
-import json
-import pickle
 import requests
 import os
-
-
+import json
+import pickle
+from fastdtw import fastdtw
+from scipy.spatial.distance import euclidean
 from dotenv import load_dotenv
+
 load_dotenv()
+
+# --- Configuration ---
 MODEL = "blazepose"   
 DRAW_SKELETON = True
 SCORE_THRESH = 0.5
-ACTION = "shoulder_press"
 
 USE_ANGLES = True
 USE_POSITIONS = False
 USE_VELOCITIES = False
 NORMALIZE_FEATURES = True
 ## 2) PoseDetector Class
+
+# --- 1. Pose Detector ---
 class PoseDetector:
     def __init__(self, backend="blazepose"):
         backend = backend.lower()
@@ -36,7 +37,9 @@ class PoseDetector:
         self.pose = mp_pose.Pose(
             model_complexity=1,
             enable_segmentation=False,
-            smooth_landmarks=True
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
         )
         self._edges = list(mp_pose.POSE_CONNECTIONS)
 
@@ -71,7 +74,8 @@ class PoseDetector:
                         ax, ay, _ = pts[a]; bx, by, _ = pts[b]
                         cv2.line(frame_bgr, (int(ax), int(ay)), (int(bx), int(by)), (0,255,0), 1)
         return frame_bgr
-## 3) Utility Functions
+
+# --- 2. Utility Functions ---
 def angle_2pts(a, b):
     a = np.array(a[:2], float); b = np.array(b[:2], float)
     delta_y, delta_x = b[1]-a[1], b[0]-a[0]
@@ -85,6 +89,8 @@ def angle_3pts(a, b, c):
     denom = (np.linalg.norm(ba)*np.linalg.norm(bc) + 1e-6)
     cosang = np.clip(np.dot(ba, bc) / denom, -1.0, 1.0)
     return float(np.degrees(np.arccos(cosang)))
+
+
 
 def normalize_pose_position(pts):
     # Normalize pose positions relative to hip center and torso scale
@@ -124,8 +130,7 @@ def normalize_pose_position(pts):
         normalized_pts.append((norm_x, norm_y, score))
     
     return normalized_pts
-## Kabsch Algorithm to tackle views from different angles
-# --- NEW: Spatial ƒment helper (adds view normalization) ---
+
 ALIGN_JOINTS = [11, 12, 23, 24, 25, 26]  # shoulders, hips, knees
 VIS_THRESH = 0.5
 
@@ -177,13 +182,66 @@ def align_skeleton(user_pts, trainer_pts,
     aligned_xy = (R @ user[:, :2].T).T + t
     return [(float(x), float(y), s) for (x, y), (_, _, s) in zip(aligned_xy, user)]
 
-## 4) Feature Extraction for DTW
+# --- 3. Feature Extractor ---
 class FeatureExtractor:
     # Extract features from pose keypoints for DTW comparison
-    def __init__(self, action="shoulder_press"):
-        self.action = action
+    def __init__(self, ACTION):
+        self.action = ACTION
         self.prev_features = None
-        
+    
+    @property
+    def features(self):
+        """
+        Dynamically generates the list of feature names based on:
+        1. The current action (Squat vs Press)
+        2. The global configuration flags (USE_ANGLES, USE_POSITIONS)
+        """
+        names = []
+
+        # 1. ADD ANGLES
+        if globals().get("USE_ANGLES", True):
+            if self.action == "shoulder_press":
+                names.extend([
+                    "right_elbow_angle", "left_elbow_angle",
+                    "right_shoulder_angle", "left_shoulder_angle"
+                ])
+            elif self.action == "squat":
+                names.extend([
+                    "right_hip_angle", "left_hip_angle",
+                    "right_knee_angle", "left_knee_angle"
+                ])
+            elif self.action == "jumping_jacks":
+                names.extend([
+                    "right_shoulder_abduct", "left_shoulder_abduct"
+                ])
+
+        # 2. ADD POSITIONS
+        if globals().get("USE_POSITIONS", False):
+            if self.action == "shoulder_press":
+                # Track wrists and elbows for press
+                names.extend([
+                    "right_wrist_x", "right_wrist_y",
+                    "left_wrist_x", "left_wrist_y",
+                    "right_elbow_x", "right_elbow_y",
+                    "left_elbow_x", "left_elbow_y"
+                ])
+            elif self.action == "squat":
+                # Track knees and hips for squat
+                names.extend([
+                    "right_knee_x", "right_knee_y",
+                    "left_knee_x", "left_knee_y",
+                    "right_hip_x", "right_hip_y",
+                    "left_hip_x", "left_hip_y"
+                ])
+            # Add jumping jacks positions if needed...
+
+        # 3. ADD VELOCITIES
+        # This automatically creates velocity names for whatever features exist so far
+        if globals().get("USE_VELOCITIES", False):
+            names += [f"{n}_velocity" for n in names]
+
+        return names
+    
     def extract_shoulder_press_features(self, pts):
         features = []
         
@@ -242,25 +300,173 @@ class FeatureExtractor:
         self.prev_features = features.copy()
         return features
     
+    def extract_jumping_jacks_features(self, pts):
+        features = []
+        
+        if not pts or len(pts) < 33:
+            return None
+        
+        pts_norm = normalize_pose_position(pts)
+        
+        if USE_ANGLES:
+            # Arm angles 
+            angle_r_shoulder_abduction = angle_3pts(pts[23], pts[11], pts[13]) # angle hip-shoulder-elbow
+            angle_l_shoulder_abduction = angle_3pts(pts[24], pts[12], pts[14]) # angle hip-shoulder-elbow
+            
+            # Elbow angles
+            angle_r_elbow = angle_3pts(pts[11], pts[13], pts[15])
+            angle_l_elbow = angle_3pts(pts[12], pts[14], pts[16])
+            
+            # Leg angles
+            angle_r_hip_abduction = angle_3pts(pts[23], pts[24], pts[26]) # angle left_hip-right_hip-right_knee
+            angle_l_hip_abduction = angle_3pts(pts[24], pts[23], pts[25]) # angle right_hip-left_hip-left_knee
+            
+            # Knee angles (should be somewhat straight)
+            angle_r_knee = angle_3pts(pts[24], pts[26], pts[28])
+            angle_l_knee = angle_3pts(pts[23], pts[25], pts[27])
+            
+            features.extend([
+                angle_r_shoulder_abduction / 180.0,
+                angle_l_shoulder_abduction / 180.0,
+                angle_r_elbow / 180.0,
+                angle_l_elbow / 180.0,
+                angle_r_hip_abduction / 180.0,
+                angle_l_hip_abduction / 180.0,
+                angle_r_knee / 180.0,
+                angle_l_knee / 180.0
+            ])
+        
+        if USE_POSITIONS:
+            # Wrist positions
+            features.extend([
+                pts_norm[15][0],  # Right wrist X
+                pts_norm[15][1],  # Right wrist Y
+                pts_norm[16][0],  # Left wrist X
+                pts_norm[16][1],  # Left wrist Y
+            ])
+            
+            # Ankle positions
+            features.extend([
+                pts_norm[27][0],  # Right ankle X
+                pts_norm[27][1],  # Right ankle Y
+                pts_norm[28][0],  # Left ankle X
+                pts_norm[28][1],  # Left ankle Y
+            ])
+        
+        # Symmetry features
+        if USE_ANGLES:
+            symmetry_shoulder = abs(angle_r_shoulder_abduction - angle_l_shoulder_abduction) / 180.0
+            symmetry_elbow = abs(angle_r_elbow - angle_l_elbow) / 180.0
+            symmetry_hip = abs(angle_r_hip_abduction - angle_l_hip_abduction) / 180.0
+            symmetry_knee = abs(angle_r_knee - angle_l_knee) / 180.0
+            features.extend([symmetry_shoulder, symmetry_elbow, symmetry_hip, symmetry_knee])
+        
+        if USE_VELOCITIES and self.prev_features is not None:
+            velocities = np.array(features) - np.array(self.prev_features[:len(features)])
+            features.extend(velocities.tolist())
+        elif USE_VELOCITIES:
+            features.extend([0] * len(features))
+        
+        self.prev_features = features.copy()
+        return features
+    
+    def extract_squats_features(self, pts):
+        features = []
+        
+        if not pts or len(pts) < 33:
+            return None
+        
+        pts_norm = normalize_pose_position(pts)
+        
+        if USE_ANGLES:
+            # Knee angles
+            angle_r_knee = angle_3pts(pts[24], pts[26], pts[28])  # hip-knee-ankle
+            angle_l_knee = angle_3pts(pts[23], pts[25], pts[27])
+            
+            # Hip angles
+            angle_r_hip = angle_3pts(pts[12], pts[24], pts[26])  # shoulder-hip-knee
+            angle_l_hip = angle_3pts(pts[11], pts[23], pts[25])
+            
+            # Ankle angles
+            angle_r_ankle = angle_3pts(pts[26], pts[28], pts[32])  # knee-ankle-foot
+            angle_l_ankle = angle_3pts(pts[25], pts[27], pts[31])
+            
+            # Torso angle shoulder-hip-vertical
+            # Approximate by angle between shoulder midpoint, hip midpoint, and a point directly below hip
+            shoulder_mid = ((pts[11][0] + pts[12][0]) / 2, (pts[11][1] + pts[12][1]) / 2, 1.0)
+            hip_mid = ((pts[23][0] + pts[24][0]) / 2, (pts[23][1] + pts[24][1]) / 2, 1.0)
+            # virtual point directly below hip for vertical reference
+            vertical_ref = (hip_mid[0], hip_mid[1] + 100, 1.0)
+            torso_angle = angle_3pts(shoulder_mid, hip_mid, vertical_ref)
+            
+            features.extend([
+                angle_r_knee / 180.0,
+                angle_l_knee / 180.0,
+                angle_r_hip / 180.0,
+                angle_l_hip / 180.0,
+                angle_r_ankle / 180.0,
+                angle_l_ankle / 180.0,
+                torso_angle / 180.0
+            ])
+        
+        if USE_POSITIONS:
+            # Hip positions (track squat depth)
+            features.extend([
+                pts_norm[23][0],  # Left hip X
+                pts_norm[23][1],  # Left hip Y
+                pts_norm[24][0],  # Right hip X
+                pts_norm[24][1],  # Right hip Y
+            ])
+            
+            # Knee positions (track knee travel)
+            features.extend([
+                pts_norm[25][0],  # Left knee X
+                pts_norm[25][1],  # Left knee Y
+                pts_norm[26][0],  # Right knee X
+                pts_norm[26][1],  # Right knee Y
+            ])
+        
+        # Symmetry features
+        if USE_ANGLES:
+            symmetry_knee = abs(angle_r_knee - angle_l_knee) / 180.0
+            symmetry_hip = abs(angle_r_hip - angle_l_hip) / 180.0
+            symmetry_ankle = abs(angle_r_ankle - angle_l_ankle) / 180.0
+            features.extend([symmetry_knee, symmetry_hip, symmetry_ankle])
+        
+        if USE_VELOCITIES and self.prev_features is not None:
+            velocities = np.array(features) - np.array(self.prev_features[:len(features)])
+            features.extend(velocities.tolist())
+        elif USE_VELOCITIES:
+            features.extend([0] * len(features))
+        
+        self.prev_features = features.copy()
+        return features
+
     def extract_features(self, pts):
         if self.action == "shoulder_press":
             return self.extract_shoulder_press_features(pts)
+        if self.action == "jumping_jacks":
+            return self.extract_jumping_jacks_features(pts)
+        if self.action == "squats":
+            return self.extract_squats_features(pts)
         else:
             raise ValueError(f"Unknown action: {self.action}")
-## 5) DTW-based Movement Analyzer
+
+# --- 4. DTW Analyzer ---
 class DTWMovementAnalyzer:
-    # Analyze and compare movements using Dynamic Time Warping
-    def __init__(self, action="shoulder_press"):
+    def __init__(self, action):
         self.action = action
         self.trainer_sequence = None
         self.trainer_general_data = {}
         self.trainer_ref_pts = None
+        #New
+        self.extractor = FeatureExtractor(action)
 
         # AI-related config
-        self.feature_names = self._init_feature_names()
+        self.feature_names = self.extractor.features
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.openai_api_url = "https://api.openai.com/v1/chat/completions"
-
+    
     def _init_feature_names(self):
         names = []
         if USE_ANGLES:
@@ -287,9 +493,330 @@ class DTWMovementAnalyzer:
                 names.append(f"{names[i]}_velocity")
 
         return names
+    
+    def _get_rep_metric(self, pts):
+        """Returns the primary angle/value used to count reps for the current action."""
+        if self.action == "shoulder_press":
+            # Rep depends on elbow extension
+            r = angle_3pts(pts[11], pts[13], pts[15])
+            l = angle_3pts(pts[12], pts[14], pts[16])
+            return (r + l) / 2  # Average of both arms
+            
+        elif self.action == "squats":
+            # Rep depends on knee flexion (going down)
+            r = angle_3pts(pts[23], pts[25], pts[27])
+            l = angle_3pts(pts[24], pts[26], pts[28])
+            return (r + l) / 2
+            
+        elif self.action == "jumping_jacks":
+            # Rep depends on shoulder abduction (arms going up)
+            r = angle_3pts(pts[23], pts[11], pts[13])
+            l = angle_3pts(pts[24], pts[12], pts[14])
+            return (r + l) / 2
+            
+        return 0
+    
+    def record_trainer_sequence(self, video_path):
+        # Record and extract features from trainer video
+        print(f"Recording trainer sequence from: {video_path}")
 
-    # ---------- AI helper methods ----------
+        detector = PoseDetector("blazepose")
+        extractor = FeatureExtractor(self.action)
 
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print("Could not open trainer video")
+            return False
+
+        sequence = []
+        frame_count = 0
+        metrics = []
+
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            pts = detector.infer(frame)
+            if pts and len(pts) == 33:
+                # Capture the first valid frame as the reference for alignment
+                if self.trainer_ref_pts is None:
+                    self.trainer_ref_pts = pts.copy()
+
+                features = extractor.extract_features(pts)
+                
+                # CRITICAL FIX: You must append the features to the sequence list
+                if features:
+                    sequence.append(features)
+                    
+                    # Calculate the dynamic metric for this frame
+                    metric = self._get_rep_metric(pts)
+                    metrics.append(metric)
+
+                frame_count += 1
+        
+        cap.release()
+
+        if not metrics or not sequence: 
+            print("No valid metrics or features found in trainer video.")
+            return False
+        
+        # Calculate dynamic range based on the specific exercise
+        min_metric = np.min(metrics)
+        max_metric = np.max(metrics)
+
+        self.trainer_sequence = np.array(sequence)
+
+        # Store dynamic thresholds (20% / 80% of range)
+        self.trainer_general_data = {
+            "frame_count": frame_count,
+            "sequence_length": len(sequence),
+            "rep_metric_min": min_metric,
+            "rep_metric_max": max_metric,
+            "rep_threshold_low": min_metric + (max_metric - min_metric) * 0.2,
+            "rep_threshold_high": min_metric + (max_metric - min_metric) * 0.8
+        }
+
+        print(f"{len(sequence)} frames with features")
+        print(f"Trainer Metric Range ({self.action}): {min_metric:.1f} to {max_metric:.1f}")
+
+        return True
+
+    # --- analyze_user_video ---
+    def analyze_user_video(self, video_path, visualize=True):
+        # Compare user video with trainer
+        if self.trainer_sequence is None:
+            print("No trainer sequence loaded")
+            return None
+
+        detector = PoseDetector("blazepose")
+        extractor = FeatureExtractor(self.action)
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print("Could not open user video")
+            return None
+
+        user_sequence = []
+        
+        # --- Rep Counting Initialization ---
+        reps = 0
+        rep_state = "start"  # States: 'start', 'mid'
+        
+        # 1. Retrieve dynamic range from trainer data, or set defaults
+        # Note: 'rep_metric_min/max' should ideally be set in record_trainer_sequence
+        t_min = self.trainer_general_data.get("rep_metric_min", 70) 
+        t_max = self.trainer_general_data.get("rep_metric_max", 170)
+        
+        # 2. Define thresholds (e.g., 25% and 75% of the range of motion)
+        r_range = t_max - t_min
+        thresh_low = t_min + (r_range * 0.25)
+        thresh_high = t_min + (r_range * 0.75)
+
+        # 3. Define movement direction
+        # Squats start High (180), go Low (<90). Press starts Low, goes High.
+        target_is_low = (self.action == "squat") 
+
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            pts_raw = detector.infer(frame)
+            if pts_raw and len(pts_raw) == 33:
+                # align for features (Kabsch / 4th-iter behavior)
+                if self.trainer_ref_pts is not None:
+                    pts_aligned = align_skeleton(pts_raw, self.trainer_ref_pts)
+                else:
+                    pts_aligned = pts_raw
+
+                features = extractor.extract_features(pts_aligned)
+                if features:
+                    user_sequence.append(features)
+
+                # --- Dynamic Rep Counting Logic ---
+                metric = self._get_rep_metric(pts_raw)
+                
+                if target_is_low: 
+                    # Case: SQUAT (Start High -> Go Low -> Return High)
+                    if rep_state == "start":
+                        if metric < thresh_low: # User went down
+                            rep_state = "mid"
+                    elif rep_state == "mid":
+                        if metric > thresh_high: # User stood back up
+                            reps += 1
+                            rep_state = "start"
+                else:
+                    # Case: PRESS / JUMPING JACKS (Start Low -> Go High -> Return Low)
+                    if rep_state == "start":
+                        if metric > thresh_high: # User pushed up
+                            rep_state = "mid"
+                    elif rep_state == "mid":
+                        if metric < thresh_low: # User came back down
+                            reps += 1
+                            rep_state = "start"
+
+                if visualize:
+                    vis = detector.draw(
+                        frame.copy(), pts_raw, score_thresh=SCORE_THRESH
+                    )
+                    cv2.putText(
+                        vis,
+                        f"Reps: {reps}",
+                        (12, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (60, 60, 255),
+                        2,
+                    )
+                    # Optional: Visualize the metric being tracked
+                    cv2.putText(vis, f"{self.action} metric: {int(metric)}", (12, 130),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+                    scale = 0.6
+                    vis_small = cv2.resize(
+                        vis,
+                        (int(vis.shape[1] * scale), int(vis.shape[0] * scale)),
+                    )
+                    cv2.imshow("User Performance (ESC to quit)", vis_small)
+                    if cv2.waitKey(1) & 0xFF == 27:
+                        break
+
+        cap.release()
+        if visualize:
+            cv2.destroyAllWindows()
+
+        if len(user_sequence) == 0:
+            print("No valid poses detected in user video")
+            return None
+
+        # DTW comparison
+        user_sequence = np.array(user_sequence)
+        print(f"User video: {len(user_sequence)} frames")
+        print(f"Trainer video: {len(self.trainer_sequence)} frames")
+
+        distance, path = fastdtw(self.trainer_sequence, user_sequence, dist=euclidean)
+        normalized_distance = distance / len(path)
+
+        max_expected_distance = 5.0
+        similarity_score = max(
+            0, min(100, 100 * (1 - normalized_distance / max_expected_distance))
+        )
+
+        # segments for feedback
+        segment_distances = []
+        window_size = 10
+        for i in range(0, len(path) - window_size, window_size):
+            segment_path = path[i : i + window_size]
+            segment_dist = (
+                sum(
+                    [
+                        euclidean(self.trainer_sequence[t], user_sequence[u])
+                        for t, u in segment_path
+                    ]
+                )
+                / window_size
+            )
+            segment_distances.append(segment_dist)
+
+        # AI analysis and feedback
+        feature_analysis = self._analyze_feature_differences(
+            self.trainer_sequence, user_sequence, path
+        )
+        timing_analysis = self._analyze_timing_coordination(
+            self.trainer_sequence, user_sequence, path
+        )
+        movement_patterns = self._identify_movement_patterns(
+            feature_analysis, timing_analysis
+        )
+        chatgpt_prompt = self._generate_chatgpt_prompt(
+            movement_patterns, similarity_score, reps
+        )
+        ai_feedback = self.get_chatgpt_feedback(chatgpt_prompt)
+
+        results = {
+            "similarity_score": similarity_score,
+            "dtw_distance": distance,
+            "normalized_distance": normalized_distance,
+            "reps_counted": reps,
+            "user_frames": len(user_sequence),
+            "trainer_frames": len(self.trainer_sequence),
+            "alignment_path_length": len(path),
+            "worst_segments": np.argsort(segment_distances)[-3:][::-1]
+            if segment_distances
+            else [],
+            "feedback": self._generate_feedback(
+                similarity_score, segment_distances
+            ),
+            "detailed_analysis": {
+                "feature_differences": feature_analysis,
+                "timing_coordination": timing_analysis,
+                "movement_patterns": movement_patterns,
+                "chatgpt_prompt": chatgpt_prompt,
+                "ai_feedback": ai_feedback,
+            },
+        }
+
+        return results
+
+    # --- Rule-based Feedback ---
+    def _generate_feedback(self, score, segment_distances):
+        # Generate form feedback based on DTW analysis
+        feedback = []
+        
+        if score == 0:
+            feedback.append("No full repetitions detected.")
+            feedback.append("Try to complete the full range of motion.")
+            return feedback
+        
+        if score >= 90:
+            feedback.append("Great form")
+        elif score >= 75:
+            feedback.append("Good form")
+        elif score >= 60:
+            feedback.append("Ok form")
+        else:
+            feedback.append("Room for improvement")
+
+        if segment_distances:
+            avg_dist = np.mean(segment_distances)
+            std_dist = np.std(segment_distances)
+
+            # Find problematic segments
+            problem_segments = [
+                i
+                for i, d in enumerate(segment_distances)
+                if d > avg_dist + std_dist
+            ]
+
+            if problem_segments:
+                if problem_segments[0] < len(segment_distances) * 0.3:
+                    feedback.append(
+                        "Focus on the starting position and initial movement."
+                    )
+                elif problem_segments[0] > len(segment_distances) * 0.7:
+                    feedback.append(
+                        "Focus on the form at the end of each rep."
+                    )
+                else:
+                    feedback.append(
+                        "Work on maintaining consistent form throughout the movement."
+                    )
+
+        # Specific shoulder press feedback
+        if self.action == "shoulder_press":
+            if score < 70:
+                feedback.append(
+                    "Tips: Keep elbows at proper angle and maintain symmetry between arms."
+                )
+                feedback.append(
+                    "Watch the trainer's elbow depth and wrist positioning."
+                )
+
+        return feedback
+
+
+    # --- Helper Analysis Methods ---
     def _analyze_feature_differences(self, trainer_seq, user_seq, path):
         feature_diffs = {name: [] for name in self.feature_names}
 
@@ -538,265 +1065,27 @@ Now give one paragraph of feedback:
         except requests.exceptions.RequestException as e:
             return f"Error getting ChatGPT feedback: {str(e)}"
 
-    # ---------- Core movement methods ----------
+# --- Global Helper for Persistence ---
+def save_trainer_data(analyzer, filename="trainer_data.pkl"):
+    with open(filename, 'wb') as f:
+        pickle.dump({
+            'sequence': analyzer.trainer_sequence,
+            'general_data': analyzer.trainer_general_data,
+            'action': analyzer.action,
+            'trainer_ref_pts': analyzer.trainer_ref_pts,
+        }, f)
+    print(f"Trainer data saved to {filename}")
 
-    def record_trainer_sequence(self, video_path):
-        # Record and extract features from trainer video
-        print(f"Recording trainer sequence from: {video_path}")
-
-        detector = PoseDetector("blazepose")
-        extractor = FeatureExtractor(self.action)
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print("Could not open trainer video")
-            return False
-
-        sequence = []
-        frame_count = 0
-
-        min_elbow_angles = []
-        max_elbow_angles = []
-
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            pts = detector.infer(frame)
-            if pts and len(pts) == 33:
-                if self.trainer_ref_pts is None:
-                    self.trainer_ref_pts = pts.copy()
-
-                features = extractor.extract_features(pts)
-                if features:
-                    sequence.append(features)
-
-                    angle_r_elbow = angle_3pts(pts[11], pts[13], pts[15])
-                    angle_l_elbow = angle_3pts(pts[12], pts[14], pts[16])
-                    min_elbow_angles.append(min(angle_r_elbow, angle_l_elbow))
-                    max_elbow_angles.append(max(angle_r_elbow, angle_l_elbow))
-
-            frame_count += 1
-
-        cap.release()
-
-        self.trainer_sequence = np.array(sequence)
-
-        self.trainer_general_data = {
-            "frame_count": frame_count,
-            "sequence_length": len(sequence),
-            "min_elbow_angle": np.min(min_elbow_angles) if min_elbow_angles else 0,
-            "max_elbow_angle": np.max(max_elbow_angles) if max_elbow_angles else 180,
-            "avg_min_elbow": np.mean(min_elbow_angles) if min_elbow_angles else 0,
-            "avg_max_elbow": np.mean(max_elbow_angles) if max_elbow_angles else 180,
-        }
-
-        print(f"{len(sequence)} frames with features")
-        print(
-            f"Min elbow angle: {self.trainer_general_data['min_elbow_angle']:.1f}°"
-        )
-        print(
-            f"Max elbow angle: {self.trainer_general_data['max_elbow_angle']:.1f}°"
-        )
-
-        return True
-
-    def analyze_user_video(self, video_path, visualize=True):
-        # Compare user video with trainer
-        if self.trainer_sequence is None:
-            print("No trainer sequence loaded")
-            return None
-
-        detector = PoseDetector("blazepose")
-        extractor = FeatureExtractor(self.action)
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print("Could not open user video")
-            return None
-
-        user_sequence = []
-        reps = 0
-        down = False
-
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            pts_raw = detector.infer(frame)
-            if pts_raw and len(pts_raw) == 33:
-                # align for features (Kabsch / 4th-iter behavior)
-                if self.trainer_ref_pts is not None:
-                    pts_aligned = align_skeleton(pts_raw, self.trainer_ref_pts)
-                else:
-                    pts_aligned = pts_raw
-
-                features = extractor.extract_features(pts_aligned)
-                if features:
-                    user_sequence.append(features)
-
-                # rep counting on raw
-                angle_r_elbow = angle_3pts(pts_raw[11], pts_raw[13], pts_raw[15])
-                if angle_r_elbow < self.trainer_general_data["avg_min_elbow"] + 15:
-                    down = True
-                if (
-                    down
-                    and angle_r_elbow
-                    > self.trainer_general_data["avg_min_elbow"] + 15
-                ):
-                    reps += 1
-                    down = False
-
-                if visualize:
-                    vis = detector.draw(
-                        frame.copy(), pts_raw, score_thresh=SCORE_THRESH
-                    )
-                    cv2.putText(
-                        vis,
-                        f"Reps: {reps}",
-                        (12, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (60, 60, 255),
-                        2,
-                    )
-                    scale = 0.6
-                    vis_small = cv2.resize(
-                        vis,
-                        (int(vis.shape[1] * scale), int(vis.shape[0] * scale)),
-                    )
-                    cv2.imshow("User Performance (ESC to quit)", vis_small)
-                    if cv2.waitKey(1) & 0xFF == 27:
-                        break
-
-        cap.release()
-        if visualize:
-            cv2.destroyAllWindows()
-
-        if len(user_sequence) == 0:
-            print("No valid poses detected in user video")
-            return None
-
-        # DTW comparison
-        user_sequence = np.array(user_sequence)
-        print(f"User video: {len(user_sequence)} frames")
-        print(f"Trainer video: {len(self.trainer_sequence)} frames")
-
-        distance, path = fastdtw(self.trainer_sequence, user_sequence, dist=euclidean)
-        normalized_distance = distance / len(path)
-
-        max_expected_distance = 5.0
-        similarity_score = max(
-            0, min(100, 100 * (1 - normalized_distance / max_expected_distance))
-        )
-
-        # segments for feedback
-        segment_distances = []
-        window_size = 10
-        for i in range(0, len(path) - window_size, window_size):
-            segment_path = path[i : i + window_size]
-            segment_dist = (
-                sum(
-                    [
-                        euclidean(self.trainer_sequence[t], user_sequence[u])
-                        for t, u in segment_path
-                    ]
-                )
-                / window_size
-            )
-            segment_distances.append(segment_dist)
-
-        # AI analysis and feedback
-        feature_analysis = self._analyze_feature_differences(
-            self.trainer_sequence, user_sequence, path
-        )
-        timing_analysis = self._analyze_timing_coordination(
-            self.trainer_sequence, user_sequence, path
-        )
-        movement_patterns = self._identify_movement_patterns(
-            feature_analysis, timing_analysis
-        )
-        chatgpt_prompt = self._generate_chatgpt_prompt(
-            movement_patterns, similarity_score, reps
-        )
-        ai_feedback = self.get_chatgpt_feedback(chatgpt_prompt)
-
-        results = {
-            "similarity_score": similarity_score,
-            "dtw_distance": distance,
-            "normalized_distance": normalized_distance,
-            "reps_counted": reps,
-            "user_frames": len(user_sequence),
-            "trainer_frames": len(self.trainer_sequence),
-            "alignment_path_length": len(path),
-            "worst_segments": np.argsort(segment_distances)[-3:][::-1]
-            if segment_distances
-            else [],
-            "feedback": self._generate_feedback(
-                similarity_score, segment_distances
-            ),
-            "detailed_analysis": {
-                "feature_differences": feature_analysis,
-                "timing_coordination": timing_analysis,
-                "movement_patterns": movement_patterns,
-                "chatgpt_prompt": chatgpt_prompt,
-                "ai_feedback": ai_feedback,
-            },
-        }
-
-        return results
-
-    def _generate_feedback(self, score, segment_distances):
-        # Generate form feedback based on DTW analysis
-        feedback = []
-
-        if score >= 90:
-            feedback.append("Great form")
-        elif score >= 75:
-            feedback.append("Good form")
-        elif score >= 60:
-            feedback.append("Ok form")
-        else:
-            feedback.append("Room for improvement")
-
-        if segment_distances:
-            avg_dist = np.mean(segment_distances)
-            std_dist = np.std(segment_distances)
-
-            # Find problematic segments
-            problem_segments = [
-                i
-                for i, d in enumerate(segment_distances)
-                if d > avg_dist + std_dist
-            ]
-
-            if problem_segments:
-                if problem_segments[0] < len(segment_distances) * 0.3:
-                    feedback.append(
-                        "Focus on the starting position and initial movement."
-                    )
-                elif problem_segments[0] > len(segment_distances) * 0.7:
-                    feedback.append(
-                        "Focus on the form at the end of each rep."
-                    )
-                else:
-                    feedback.append(
-                        "Work on maintaining consistent form throughout the movement."
-                    )
-
-        # Specific shoulder press feedback
-        if self.action == "shoulder_press":
-            if score < 70:
-                feedback.append(
-                    "Tips: Keep elbows at proper angle and maintain symmetry between arms."
-                )
-                feedback.append(
-                    "Watch the trainer's elbow depth and wrist positioning."
-                )
-
-        return feedback
+def load_trainer_data(analyzer, filename="trainer_data.pkl"):
+    if not os.path.exists(filename): return False
+    with open(filename, 'rb') as f:
+        data = pickle.load(f)
+    analyzer.trainer_sequence = data['sequence']
+    analyzer.trainer_general_data = data['general_data']
+    analyzer.action = data['action']
+    analyzer.trainer_ref_pts = data.get('trainer_ref_pts')
+    print(f"Trainer data loaded from {filename}")
+    return True
 
 ## 6) Main Execution Pipeline
 def fit_into_cell(frame, cell_w, cell_h):
