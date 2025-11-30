@@ -447,7 +447,7 @@ class FeatureExtractor:
             return self.extract_shoulder_press_features(pts)
         if self.action == "jumping_jacks":
             return self.extract_jumping_jacks_features(pts)
-        if self.action == "squats":
+        if self.action == "squat":
             return self.extract_squats_features(pts)
         else:
             raise ValueError(f"Unknown action: {self.action}")
@@ -502,7 +502,7 @@ class DTWMovementAnalyzer:
             l = angle_3pts(pts[12], pts[14], pts[16])
             return (r + l) / 2  # Average of both arms
             
-        elif self.action == "squats":
+        elif self.action == "squat":
             # Rep depends on knee flexion (going down)
             r = angle_3pts(pts[23], pts[25], pts[27])
             l = angle_3pts(pts[24], pts[26], pts[28])
