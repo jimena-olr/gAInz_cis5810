@@ -39,9 +39,9 @@ detector = None # Global PoseDetector instance
 
 # Map internal action names to their trainer video filenames in /static/
 TRAINER_VIDEOS = {
-    "shoulder_press": "shoulder_press_trainer.mp4",
-    "squat": "squat_trainer.mp4",
-    "jumping_jacks": "jumping_jacks_trainer.mp4"
+    "shoulder_press": "trainer_shoulder_press.mp4",
+    "squat": "trainer_squats.mp4",
+    "jumping_jacks": "trainer_jumping_jacks.mp4"
 }
 
 def load_analyzers():
@@ -253,11 +253,13 @@ def process_video_file(input_path, output_path, analyzer, detector):
     
     # Calculate Score
     max_expected_distance = 5.0 
-    similarity_score = max(0, min(100, 100 * (1 - normalized_distance / max_expected_distance)))
+    similarity_score = max(0, min(100, 100 * (1 - 3 * normalized_distance / max_expected_distance)))
     
     # Generate Feedback
     feature_analysis = analyzer._analyze_feature_differences(trainer_sequence_np, user_sequence_np, path)
-    timing_analysis = analyzer._analyze_timing_coordination(trainer_sequence_np, user_sequence_np, path)
+    
+    trainer_reps = analyzer.trainer_general_data.get('trainer_reps', 0)
+    timing_analysis = analyzer._analyze_timing_coordination(trainer_sequence_np, user_sequence_np, path, reps, trainer_reps)
     patterns = analyzer._identify_movement_patterns(feature_analysis, timing_analysis)
     prompt = analyzer._generate_chatgpt_prompt(patterns, similarity_score, reps)
     feedback = analyzer.get_chatgpt_feedback(prompt)

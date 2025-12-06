@@ -19,6 +19,9 @@ USE_ANGLES = True
 USE_POSITIONS = False
 USE_VELOCITIES = False
 NORMALIZE_FEATURES = True
+
+ACTION = "shoulder_press"  # Options: "shoulder_press", "squat", "jumping_jacks"
+
 ## 2) PoseDetector Class
 
 # --- 1. Pose Detector ---
@@ -495,7 +498,6 @@ class DTWMovementAnalyzer:
         return names
     
     def _get_rep_metric(self, pts):
-        """Returns the primary angle/value used to count reps for the current action."""
         if self.action == "shoulder_press":
             # Rep depends on elbow extension
             r = angle_3pts(pts[11], pts[13], pts[15])
@@ -545,7 +547,6 @@ class DTWMovementAnalyzer:
 
                 features = extractor.extract_features(pts)
                 
-                # CRITICAL FIX: You must append the features to the sequence list
                 if features:
                     sequence.append(features)
                     
@@ -577,13 +578,76 @@ class DTWMovementAnalyzer:
             "rep_threshold_high": min_metric + (max_metric - min_metric) * 0.8
         }
 
+
+
+
+        # --- Rep Counting Initialization ---
+        trainer_reps = 0
+        rep_state = "start"  # States: 'start', 'mid'
+        
+        # 1. Retrieve dynamic range from trainer data, or set defaults
+        # Note: 'rep_metric_min/max' should ideally be set in record_trainer_sequence
+        t_min = self.trainer_general_data.get("rep_metric_min", 70) 
+        t_max = self.trainer_general_data.get("rep_metric_max", 170)
+        
+        # 2. Define thresholds (e.g., 25% and 75% of the range of motion)
+        r_range = t_max - t_min
+        thresh_low = t_min + (r_range * 0.25)
+        thresh_high = t_min + (r_range * 0.75)
+
+        # 3. Define movement direction
+        # Squats start High (180), go Low (<90). Press starts Low, goes High.
+        target_is_low = (self.action == "squat") 
+
+        cap = cv2.VideoCapture(video_path)
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            pts_raw = detector.infer(frame)
+            if pts_raw and len(pts_raw) == 33:
+                # align for features (Kabsch / 4th-iter behavior)
+                if self.trainer_ref_pts is not None:
+                    pts_aligned = align_skeleton(pts_raw, self.trainer_ref_pts)
+                else:
+                    pts_aligned = pts_raw
+
+                features = extractor.extract_features(pts_aligned)
+                if features:
+                    sequence.append(features)
+
+                # --- Dynamic Rep Counting Logic ---
+                metric = self._get_rep_metric(pts_raw)
+                
+                if target_is_low: 
+                    # Case: SQUAT (Start High -> Go Low -> Return High)
+                    if rep_state == "start":
+                        if metric < thresh_low: # User went down
+                            rep_state = "mid"
+                    elif rep_state == "mid":
+                        if metric > thresh_high: # User stood back up
+                            trainer_reps += 1
+                            rep_state = "start"
+                else:
+                    # Case: PRESS / JUMPING JACKS (Start Low -> Go High -> Return Low)
+                    if rep_state == "start":
+                        if metric > thresh_high: # User pushed up
+                            rep_state = "mid"
+                    elif rep_state == "mid":
+                        if metric < thresh_low: # User came back down
+                            trainer_reps += 1
+                            rep_state = "start"
+
+        cap.release()
+        self
         print(f"{len(sequence)} frames with features")
         print(f"Trainer Metric Range ({self.action}): {min_metric:.1f} to {max_metric:.1f}")
 
-        return True
+        return trainer_reps
 
     # --- analyze_user_video ---
-    def analyze_user_video(self, video_path, visualize=True):
+    def analyze_user_video(self, video_path, visualize=True, trainer_reps=0):
         # Compare user video with trainer
         if self.trainer_sequence is None:
             print("No trainer sequence loaded")
@@ -724,7 +788,7 @@ class DTWMovementAnalyzer:
             self.trainer_sequence, user_sequence, path
         )
         timing_analysis = self._analyze_timing_coordination(
-            self.trainer_sequence, user_sequence, path
+            self.trainer_sequence, user_sequence, path, reps, trainer_reps
         )
         movement_patterns = self._identify_movement_patterns(
             feature_analysis, timing_analysis
@@ -850,11 +914,13 @@ class DTWMovementAnalyzer:
             )[:5],  # top 5
         }
 
-    def _analyze_timing_coordination(self, trainer_seq, user_seq, path):
+    def _analyze_timing_coordination(self, trainer_seq, user_seq, path, user_reps, trainer_reps):
         # Pace
         trainer_frames = len(trainer_seq)
         user_frames = len(user_seq)
-        pace_ratio = user_frames / trainer_frames if trainer_frames > 0 else 1.0
+        user_pace = user_frames / user_reps if user_reps > 0 else user_frames
+        trainer_pace = trainer_frames / trainer_reps if trainer_reps > 0 else trainer_frames
+        pace_ratio = user_pace / trainer_pace if trainer_pace > 0 else 1.0
 
         # Synchronization over sliding windows
         sync_scores = []
@@ -899,13 +965,13 @@ class DTWMovementAnalyzer:
         else:
             coordination_score = 1.0
 
-        if pace_ratio < 0.8:
+        if pace_ratio < 0.1:
             pace_description = "significantly faster than trainer"
-        elif pace_ratio < 0.95:
+        elif pace_ratio < 0.14:
             pace_description = "slightly faster than trainer"
-        elif pace_ratio <= 1.05:
+        elif pace_ratio <= 0.2:
             pace_description = "matching trainer pace"
-        elif pace_ratio <= 1.2:
+        elif pace_ratio <= 0.25:
             pace_description = "slightly slower than trainer"
         else:
             pace_description = "significantly slower than trainer"
@@ -1210,13 +1276,15 @@ def main():
 
     trainer_video = "Videos/shoulder_press/shoulder_press_trainer.mp4"
     user_videos = [
-        "Videos/shoulder_press/0_shoulder_press_jimena_0_deg.MOV",
-        "Videos/shoulder_press/0_shoulder_press_jimena_45_deg.mp4",
-        "Videos/shoulder_press/0_shoulder_press_jimena_90_deg.MOV",
+        "Videos/jumping_jacks/1_jumping_jacks_jimena_0_deg.mp4",
+        "Videos/jumping_jacks/1_jumping_jacks_jimena_45_deg.mp4",
+        "Videos/jumping_jacks/1_jumping_jacks_jimena_90_deg.MOV",
     ]
 
     # 1) Extract trainer features once
-    if not analyzer.record_trainer_sequence(trainer_video):
+    trainer_reps = analyzer.record_trainer_sequence(trainer_video)
+
+    if not trainer_reps:
         print("Failed to get trainer features")
         return
     save_trainer_data(analyzer, f"{ACTION}_trainer.pkl")
@@ -1225,8 +1293,9 @@ def main():
     for user_video in user_videos:
         print("\n==============================")
         print(f"Analyzing: {user_video}")
+        print(trainer_reps)
 
-        res = analyzer.analyze_user_video(user_video, visualize=False)
+        res = analyzer.analyze_user_video(user_video, visualize=False, trainer_reps=trainer_reps)
 
         if not res:
             print("Analysis failed")
